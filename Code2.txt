@@ -1,0 +1,451 @@
+  public static class CommonExtensionMethods
+    {
+        private static readonly string _path = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        private static readonly bool _iswin = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        private static readonly bool _islinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+        private const string key = "4B8F92D7A6C1E5F3049B8A2C7D6E1F903A5B8C4D7E2F6019A3C6D8E5F0B4A71";
+        private static readonly int ivSizeBytes = 16; //Is it the same as block size? Research
+
+        private static AesCryptoServiceProvider encDec = new AesCryptoServiceProvider();
+        static CommonExtensionMethods()
+        {
+            encDec.BlockSize = 128; //Bits
+            encDec.KeySize = 256; //Bits
+            encDec.Padding = PaddingMode.PKCS7;
+            encDec.Mode = CipherMode.CBC;
+        }
+
+        public static bool IsLast<T>(this IList<T> list, T item)
+        {
+            if (list == null || list.Count == 0) return false;
+
+            // Use EqualityComparer to handle nulls and different types correctly
+            return EqualityComparer<T>.Default.Equals(list[list.Count - 1], item);
+        }
+
+        public static int? EnumToIntOrNull<TEnum>(this TEnum? enumValue) where TEnum : struct, System.Enum
+        {
+            return enumValue.HasValue ? Convert.ToInt32(enumValue.Value) : (int?)null;
+        }
+
+        public static string BreakIfNeeded(this string input, int chunkSize = 20)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            // If there's already a space within chunkSize, skip processing
+            if (Regex.IsMatch(input, $@"\S{{1,{chunkSize}}}\s"))
+                return input;
+
+            // Insert space every chunkSize characters
+            return Regex.Replace(input, $@"(.{{{chunkSize}}})", "$1 ");
+        }
+
+        public static string GetPropertyDescription<T>(this T input, string propertyName)
+        {
+            PropertyDescriptor propDesc = TypeDescriptor.GetProperties(typeof(T))[propertyName];
+            if (propDesc == null)
+            {
+                throw new ArgumentException($"Property '{propertyName}' not found on type '{typeof(T).FullName}'.");
+            }
+
+            DescriptionAttribute descriptionAttribute = (DescriptionAttribute)propDesc.Attributes[typeof(DescriptionAttribute)];
+
+            return descriptionAttribute != null ? descriptionAttribute.Description : "No description available.";
+        }
+
+        public static string RemoveSpecialCharacters(this string input)
+        {
+            if (string.IsNullOrEmpty(input))
+            {
+                return "";
+            }
+            string pattern = "[^a-zA-Z0-9 ]";
+            string replacement = ""; // Replace special characters with an underscore
+            Regex regex = new Regex(pattern);
+            return regex.Replace(input, replacement);
+        }
+
+        public static string ReplaceSpecialCharacters(this string input, string replace)
+        {
+            if (string.IsNullOrEmpty(input))
+            {
+                return string.Empty;
+            }
+            // Regex pattern: anything that's not a-z, A-Z, 0-9, or space
+            string pattern = @"[^a-zA-Z0-9 ]";
+            // Use the passed replacement instead of hardcoded value
+            Regex regex = new Regex(pattern, RegexOptions.Compiled);
+            return regex.Replace(input, replace);
+        }
+
+
+        public static bool IsBlankOrNonNumber(this object objValue)
+        {
+            var value = objValue.GetString().Trim();
+            if (string.IsNullOrEmpty(value))
+            {
+                return true;
+            }
+            var tmp = long.TryParse(value, out long newValue);
+            return !tmp;
+        }
+
+        public static bool IsNullOrEmpty(this string value)
+        {
+            return string.IsNullOrEmpty(value);
+        }
+
+        public static bool IsNonNumber(this object objValue)
+        {
+            var value = objValue.GetString().Trim();
+            if (string.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+            var tmp = long.TryParse(value, out long newValue);
+            return !tmp;
+        }
+
+        public static List<List<T>> ChunkBy<T>(this List<T> source, int chunkSize)
+        {
+            return source
+                .Select((x, i) => new { Index = i, Value = x })
+                .GroupBy(x => x.Index / chunkSize)
+                .Select(x => x.Select(v => v.Value).ToList())
+                .ToList();
+        }
+
+        public static T TrimStringProperties<T>(this T input) where T : class
+        {
+            var stringProperties = input.GetType().GetProperties()
+                .Where(p => p.PropertyType == typeof(string) && p.CanWrite);
+
+            foreach (var stringProperty in stringProperties)
+            {
+                string currentValue = (string)stringProperty.GetValue(input, null);
+                if (currentValue != null)
+                {
+                    stringProperty.SetValue(input, currentValue.Trim(), null);
+                }
+            }
+            return input;
+        }
+
+        public static IDictionary<string, object> AddProperty(this object obj, string name, object value)
+        {
+            var dictionary = obj.ToDictionary();
+            dictionary.Add(name, value);
+            return dictionary;
+        }
+
+        public static string StrConcat(this string me, string other)
+        {
+            return $"{me} {other}".Trim().Replace("  ", " ");
+        }
+
+        // helper
+        public static IDictionary<string, object> ToDictionary(this object obj)
+        {
+            IDictionary<string, object> result = new Dictionary<string, object>();
+            PropertyDescriptorCollection properties = TypeDescriptor.GetProperties(obj);
+            foreach (PropertyDescriptor property in properties)
+            {
+                result.Add(property.Name, property.GetValue(obj));
+            }
+            return result;
+        }
+
+        public static string FormatDateTime(this DateTime? date, string format)
+        {
+            //yyyy-MM-dd hh:mm:ss
+            if (date == null)
+            {
+                return "";
+            }
+            var tmp = date.Value.ToString(format);
+            if (format.Contains("-"))
+            {
+                tmp = tmp.Replace("/", "-");
+            }
+            return tmp;
+        }
+
+       
+
+
+        public static bool IsTrimNullOrEmpty(this string input)
+        {
+            return string.IsNullOrEmpty(input.GetString().Trim());
+        }
+
+        public static string ClearPhoneNumber(this string input)
+        {
+            return input.GetString()
+                            .Replace("(", "").Replace(")", "")
+                            .Replace("-", "").Replace(" ", "").Trim();
+        }
+
+        public static string GetDisplayString(this object input)
+        {
+            string val = input.GetString().Trim();
+            if (string.IsNullOrEmpty(val))
+            {
+                return "-";
+            }
+            return val;
+        }
+
+        
+
+
+
+
+        public static string GetMD5(this string input)
+        {
+            using (var provider = System.Security.Cryptography.MD5.Create())
+            {
+                StringBuilder builder = new StringBuilder();
+
+                foreach (byte b in provider.ComputeHash(Encoding.UTF8.GetBytes(input)))
+                {
+                    builder.Append(b.ToString("x2").ToLower());
+                }
+
+                return builder.ToString();
+            }
+        }
+
+
+        public static bool IsNumeric(this object objValue)
+        {
+            if (double.TryParse(GetString(objValue), out double newValue))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        public static string GetString(this object objValue)
+        {
+            if (objValue == null)
+            {
+                return "";
+            }
+            if (objValue == DBNull.Value)
+            {
+                return "";
+            }
+            return objValue.ToString();
+        }
+
+        public static string GetStringToLower(this object objValue)
+        {
+            if (objValue == null || objValue == DBNull.Value)
+            {
+                return "";
+            }
+            return objValue.ToString().ToLower();
+        }
+
+        public static long GetLong(this object objValue)
+        {
+            string value = GetString(objValue);
+            if (value == "")
+            {
+                return 0;
+            }
+            return Convert.ToInt64(value);
+        }
+
+        public static int GetInt(this object objValue)
+        {
+            string value = GetString(objValue);
+            if (value == "")
+            {
+                return 0;
+            }
+            return Convert.ToInt32(value);
+        }
+
+
+        public static int? GetIntOrNull(this object objValue)
+        {
+            string value = GetString(objValue);
+            if (value == "")
+            {
+                return null;
+            }
+            return Convert.ToInt32(value);
+        }
+
+        public static bool GetBoolean(this object objValue)
+        {
+            string value = GetString(objValue);
+            if (value == "")
+            {
+                return false;
+            }
+            if (value == "1" || value.ToLower() == "true")
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+    
+     
+
+        public static string GetJson<T>(this T source, Formatting format = Formatting.None)
+        {
+            var serialized = JsonConvert.SerializeObject(source, format);
+            return serialized;
+        }
+
+        public static T GetFromJson<T>(this string json)
+        {
+            if (string.IsNullOrEmpty(json))
+            {
+                return default(T);
+            }
+            return JsonConvert.DeserializeObject<T>(json);
+        }
+
+        public static string Description<T>(this T value) where T : struct
+        {
+            var enumType = value.GetType();
+            var field = enumType.GetField(value.ToString());
+            if (field != null)
+            {
+                var attributes = field.GetCustomAttributes(typeof(DescriptionAttribute), false);
+                return attributes.Length == 0 ? value.ToString() : ((DescriptionAttribute)attributes[0]).Description;
+            }
+            return "";
+        }
+
+
+
+        public static string YesNo(this bool input)
+        {
+            if (input)
+            {
+                return "Yes";
+            }
+            return "No";
+        }
+
+        public static string YesNo(this int input)
+        {
+            if (input == 1)
+            {
+                return "Yes";
+            }
+            return "No";
+        }
+
+
+        public static string DecryptString(this string input)
+        {
+            string output = "";
+            output = DecryptAes256(HexToByte(key), input);
+            return output;
+        }
+
+        public static string EncryptString(this string input)
+        {
+            string output = "";
+            if (input == "")
+            {
+                return "";
+            }
+            output = EncryptAes256(HexToByte(key), GenerateRandomIV(), input);
+            return output;
+        }
+
+
+        private static byte[] GenerateRandomKey()
+        {
+            encDec.GenerateKey();
+            return encDec.Key;
+        }
+
+        private static byte[] GenerateRandomIV()
+        {
+            encDec.GenerateIV();
+            return encDec.IV;
+        }
+
+        private static string EncryptAes256(byte[] key, byte[] iv, string input)
+        {
+            if (key.Length * 8 != encDec.KeySize)
+            {
+                throw new ArgumentException(string.Format("Invalid key length. {0} bytes expected {1} provided.",
+                    encDec.KeySize / 8, key.Length), "key");
+            }
+
+            if (iv.Length != ivSizeBytes)
+            {
+                throw new ArgumentException(string.Format("Invalid iv length. {0} bytes expected {1} provided.",
+                    ivSizeBytes, iv.Length), "iv");
+            }
+
+            byte[] textbytes = ASCIIEncoding.UTF8.GetBytes(input);
+
+            using (ICryptoTransform iEncProvider = encDec.CreateEncryptor(key, iv))
+            {
+                byte[] enc = iEncProvider.TransformFinalBlock(textbytes, 0, textbytes.Length);
+
+                //TODO: am p2. For speed using System.Buffer.BlockCopy should be faster than LINQ.
+                //Returning IV+encrypted_text. IV does not need to be encrypted.
+                return Convert.ToBase64String(iv.Concat(enc).ToArray());
+            }
+        }
+
+        private static string DecryptAes256(byte[] key, string input)
+        {
+            if (key.Length * 8 != encDec.KeySize)
+            {
+                throw new ArgumentException(string.Format("Invalid key length. {0} bytes expected {1} provided.",
+                    encDec.KeySize / 8, key.Length), "key");
+            }
+
+            //First bytes are IV.
+            byte[] encbytes = Convert.FromBase64String(input);
+
+            //First bytes are IV.
+            var iv = encbytes.Take(ivSizeBytes).ToArray();
+
+            using (ICryptoTransform iDecProvider = encDec.CreateDecryptor(key, iv))
+            {
+                byte[] enc = iDecProvider.TransformFinalBlock(
+                    encbytes, ivSizeBytes, encbytes.Length - ivSizeBytes);
+
+                return ASCIIEncoding.UTF8.GetString(enc);
+            }
+        }
+
+        private static string ByteToHex(IEnumerable<byte> bytes)
+        {
+            //TODO: am p2. Any cleaner way to convert? This is ugly.
+            return string.Concat(bytes.Select(b => b.ToString("X2")));
+        }
+
+        private static byte[] HexToByte(string hex)
+        {
+            //TODO: am p2. Any cleaner way to convert? This is even more ugly.
+            return Enumerable.Range(0, hex.Length)
+                     .Where(x => x % 2 == 0)
+                     .Select(x => Convert.ToByte(hex.Substring(x, 2), 16))
+                     .ToArray();
+
+        }
+
+        private static string GetAesKey()
+        {
+            return key;
+        }
+    }
+
