@@ -1,0 +1,415 @@
+You are CSV/Excel header matching agent.
+
+I have mentioned field which I am using in my charges table here;
+Read above fields carefully, understand the meaning of fields and compare with the given fields which fields are matching with table fields.
+Generate Json array as result with matching
+
+Table Fields:
+	- PatientName            Full name/name of the patient/Member Name
+	- DateOfService          Date when the Svc Date/service/procedure/appointment was actually performed. Possible matches DOS, Service Date, Appointment Date, Encounter Date, ....
+	- InvoiceDate            Date the invoice/bill was generated
+	- PostDate               Date the charge was posted to the system
+	- Insurance              Insurance company name, payer name, or plan name
+	- Facility               Facility / location / clinic / hospital name where service occurred
+	- FirstName              First name of patient. Possible but not limited matches: Member First Name, Fname, FN, Patient First Name, PatientFirstName, First, GivenName ...
+	- LastName               Last name of patient. Possible but not limited matches: Member Last Name, Lname, LN, Patient Last Name, PatientLastName, Last, FamilyName ...
+	- SheetName              Name of the worksheet/tab/source sheet (for multi-sheet imports)
+	- EncounterId            EncounterId / visitId / appointmentId / encounter number / ID (common variations: Encounter, Encounter No, Visit ID ...)
+	- PrimaryDiagnosis       Primary / first diagnosis code (ICD-10 or similar). Possible matches: Dx1, Diag1, Diagnosis Code 1, Primary Diagnosis ...
+	- SecondaryDiagnosis     Secondary / second diagnosis code. Possible matches: Dx2, Diag2, Diagnosis Code 2, Secondary Diagnosis ...
+	- CptCodeWithModifiers   Full procedure code(s) including any modifiers (often comma-separated or space-separated). Possible matches: Proc+Mod, CPT+Mod, Procedures w/ Mods, Service Codes ...
+	- CptCode                CPT / HCPCS procedure code (without modifiers). Possible matches: CPT, Procedure, Procedure Code, HCPCS, Serv Code ...
+	- PrimaryInsurance       Name of the primary insurance / payer. Possible matches: Primary Ins, Pri Payer, Primary Plan, Ins1 ...
+	- SecondaryInsurance     Name of the secondary / other insurance / payer. Possible matches: Secondary Ins, Sec Payer, Secondary Plan, Ins2, Other Insurance ...
+	- ProviderName           Name or ID of the rendering / performing provider / Rend Provider / physician /Rendering Provider First /Rendering Provider Last. Possible matches: Rendering Prov, Provider, Physician, Render Doc, Billing Provider ...
+	- TotalAmount            Total charged amount for the service/line/item (numeric). Possible matches: Charge, Charges, Total Charge, Charge Amount, Amount, Charges, Billed Amount, Fee ...
+	- AdjustAmount           Adjustment amount (numeric) applied to the charge. Possible matches: Adj Amt, Adjustment, Adjustment Amount, Adj, Adj Charge ...
+	- ReceivedAmount         Amount of payment received (numeric). Possible matches: Payment, Paid Amount, Payment Amount, Received, Amount Received ...
+
+
+Result Sample:
+[
+	{
+		"table_field": "PatientName",
+		"matched_field": "FullName",
+		"field_index": int (index of matched_field)
+	}
+]
+
+Rules:
+ - field_index is always an integer or null. Carefully read all headers, match them accurately, and assign the index with the highest possible confidence.
+
+Create well structured and fully clean Json as result. Don’t ass ```json and ``` in the start and end of response.
+
+
+=====================================================================================================
+public async Task<List<ExcelSheetHeaderDto>> GetBillingHeaderDtos(BillingFileDto fileDto)
+{
+    var result = new List<ExcelSheetHeaderDto>();
+    var semaphore = new SemaphoreSlim(5);
+    BillingExcelReader billingExcelReader = new BillingExcelReader();
+    string path = (fileDto.Type == BillingFileType.Charge) ?
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Prompts", "charge-header-matching.txt")
+                    : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Prompts", "payment-header-matching.txt");
+    var systemPrompt = File.ReadAllText(path);
+    var headerList = billingExcelReader.GetExcelHeaders(fileDto.FileData);
+    var tasks = new List<Task<List<BillingHeaderDto>>>();
+    foreach (var header in headerList)
+    {
+        await semaphore.WaitAsync();
+        tasks.Add(ProcessHeaderAsync(header, systemPrompt, semaphore));
+    }
+    await Task.WhenAll(tasks);
+    foreach (var task in tasks)
+    {
+        var index = tasks.IndexOf(task);
+        var obj = new ExcelSheetHeaderDto()
+        {
+            Headers = task.Result,
+            SheetName = headerList[index].Item1
+        };
+        result.Add(obj);
+    }
+    return result;
+}
+=====================================================================================================
+
+  public class BillingExcelReader
+  {
+      public List<Tuple<string, List<string>>> GetExcelHeaders(byte[] fileBytes)
+      {
+
+          var result = new List<Tuple<string, List<string>>>();
+
+          using var stream = new MemoryStream(fileBytes);
+          using var workbook = new XLWorkbook(stream);
+
+          foreach (var worksheet in workbook.Worksheets)
+          {
+              var sheetName = FormatSheetName(worksheet.Name);
+              var headers = new List<string>();
+
+              var firstRow = worksheet.RangeUsed()?.RowsUsed().FirstOrDefault();
+              if (firstRow != null)
+              {
+                  foreach (var cell in firstRow.Cells())
+                  {
+                      var value = cell.GetValue<string>()?.Trim();
+                      if (!string.IsNullOrEmpty(value))
+                      {
+                          headers.Add(value);
+                      }
+                  }
+              }
+              if (headers.Count > 2)
+              {
+                  result.Add(new Tuple<string, List<string>>(sheetName, headers));
+              }
+          }
+
+          return result;
+      }
+
+      private string FormatSheetName(string sheetName)
+      {
+          return sheetName;
+      }
+
+      public List<Tuple<string, List<ChargeDto>>> GetChargesByHeaders(byte[] fileBytes, List<ExcelSheetHeaderDto> sheetConfigs)
+      {
+          var result = new List<Tuple<string, List<ChargeDto>>>();
+          using var stream = new MemoryStream(fileBytes);
+          using var workbook = new XLWorkbook(stream);
+          foreach (var config in sheetConfigs)
+          {
+              var worksheet = workbook.Worksheets.FirstOrDefault(x => x.Name.Equals(config.SheetName, StringComparison.OrdinalIgnoreCase));
+              if (worksheet == null) continue;
+              var sheetCharges = new List<ChargeDto>();
+              var headerRow = worksheet.RangeUsed()?.RowsUsed().FirstOrDefault();
+              if (headerRow == null) continue;
+              var headerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+              int colIndex = 1;
+              foreach (var cell in headerRow.Cells())
+              {
+                  var val = cell.GetString().Trim();
+                  if (!string.IsNullOrEmpty(val) && !headerMap.ContainsKey(val)) headerMap[val] = colIndex;
+                  colIndex++;
+              }
+              var mappedIndex = new Dictionary<string, int>();
+              foreach (var h in config.Headers)
+              {
+                  if (!string.IsNullOrEmpty(h.MatchedField) && headerMap.ContainsKey(h.MatchedField))
+                      mappedIndex[h.TableFiled] = headerMap[h.MatchedField];
+              }
+              var rows = worksheet.RangeUsed()?.RowsUsed().Skip(1);
+              if (rows == null) continue;
+              foreach (var row in rows)
+              {
+                  if (row.Cell(1).IsEmpty())
+                      continue;
+                  if (row.Cell(1).GetString().Contains("TOTAL", StringComparison.OrdinalIgnoreCase)
+                          || row.Cell(1).GetString().Contains("Summary", StringComparison.OrdinalIgnoreCase))
+                      continue;
+
+                  var dto = new ChargeDto { SheetName = config.SheetName };
+
+                  if (mappedIndex.ContainsKey("PatientName"))
+                      dto.PatientName = row.Cell(mappedIndex["PatientName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("FirstName"))
+                      dto.FirstName = row.Cell(mappedIndex["FirstName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("LastName"))
+                      dto.LastName = row.Cell(mappedIndex["LastName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("Insurance"))
+                      dto.Insurance = row.Cell(mappedIndex["Insurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("Facility"))
+                      dto.Facility = row.Cell(mappedIndex["Facility"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PostDate"))
+                      dto.PostDate = GetDate(row.Cell(mappedIndex["PostDate"]));
+
+                  if (mappedIndex.ContainsKey("DateOfService"))
+                      dto.DateOfService = GetDate(row.Cell(mappedIndex["DateOfService"]));
+
+                  if (mappedIndex.ContainsKey("EncounterId"))
+                      dto.EncounterId = row.Cell(mappedIndex["EncounterId"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PrimaryDiagnosis"))
+                      dto.PrimaryDiagnosis = row.Cell(mappedIndex["PrimaryDiagnosis"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("SecondaryDiagnosis"))
+                      dto.SecondaryDiagnosis = row.Cell(mappedIndex["SecondaryDiagnosis"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("CptCodeWithModifiers"))
+                      dto.CptCodeWithModifiers = row.Cell(mappedIndex["CptCodeWithModifiers"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("CptCode"))
+                      dto.CptCode = row.Cell(mappedIndex["CptCode"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PrimaryInsurance"))
+                      dto.PrimaryInsurance = row.Cell(mappedIndex["PrimaryInsurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("SecondaryInsurance"))
+                      dto.SecondaryInsurance = row.Cell(mappedIndex["PrimaryInsurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("ProviderName"))
+                      dto.ProviderName = row.Cell(mappedIndex["ProviderName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("TotalAmount"))
+                  {
+                      var cell = row.Cell(mappedIndex["TotalAmount"]);
+                      dto.TotalAmount = GetDecimal(cell);
+                  }
+                  sheetCharges.Add(dto);
+              }
+
+              result.Add(new Tuple<string, List<ChargeDto>>(config.SheetName, sheetCharges));
+          }
+          return result;
+      }
+
+      public List<Tuple<string, List<PaymentDto>>> GetPaymentsByHeaders(byte[] fileBytes, List<ExcelSheetHeaderDto> sheetConfigs)
+      {
+          var result = new List<Tuple<string, List<PaymentDto>>>();
+          using var stream = new MemoryStream(fileBytes);
+          using var workbook = new XLWorkbook(stream);
+          foreach (var config in sheetConfigs)
+          {
+              var worksheet = workbook.Worksheets.FirstOrDefault(x => x.Name.Equals(config.SheetName, StringComparison.OrdinalIgnoreCase));
+              if (worksheet == null) continue;
+              var sheetCharges = new List<PaymentDto>();
+              var headerRow = worksheet.RangeUsed()?.RowsUsed().FirstOrDefault();
+              if (headerRow == null) continue;
+              var headerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+              int colIndex = 1;
+              foreach (var cell in headerRow.Cells())
+              {
+                  var val = cell.GetString().Trim();
+                  if (!string.IsNullOrEmpty(val) && !headerMap.ContainsKey(val)) headerMap[val] = colIndex;
+                  colIndex++;
+              }
+              var mappedIndex = new Dictionary<string, int>();
+              foreach (var h in config.Headers)
+              {
+                  if (!string.IsNullOrEmpty(h.MatchedField) && headerMap.ContainsKey(h.MatchedField))
+                      mappedIndex[h.TableFiled] = headerMap[h.MatchedField];
+              }
+              var rows = worksheet.RangeUsed()?.RowsUsed().Skip(1);
+              if (rows == null) continue;
+              foreach (var row in rows)
+              {
+                  if (row.Cell(1).IsEmpty())
+                      continue;
+                  if (row.Cell(1).GetString().Contains("TOTAL", StringComparison.OrdinalIgnoreCase)
+                          || row.Cell(1).GetString().Contains("Summary", StringComparison.OrdinalIgnoreCase))
+                      continue;
+
+                  var dto = new PaymentDto { SheetName = config.SheetName };
+
+                  if (mappedIndex.ContainsKey("PatientName"))
+                      dto.PatientName = row.Cell(mappedIndex["PatientName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("FirstName"))
+                      dto.FirstName = row.Cell(mappedIndex["FirstName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("LastName"))
+                      dto.LastName = row.Cell(mappedIndex["LastName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("Insurance"))
+                      dto.Insurance = row.Cell(mappedIndex["Insurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("Facility"))
+                      dto.Facility = row.Cell(mappedIndex["Facility"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PostDate"))
+                      dto.PostDate = GetDate(row.Cell(mappedIndex["PostDate"]));
+
+                  if (mappedIndex.ContainsKey("DateOfService"))
+                      dto.DateOfService = GetDate(row.Cell(mappedIndex["DateOfService"]));
+
+                  if (mappedIndex.ContainsKey("EncounterId"))
+                      dto.EncounterId = row.Cell(mappedIndex["EncounterId"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PrimaryDiagnosis"))
+                      dto.PrimaryDiagnosis = row.Cell(mappedIndex["PrimaryDiagnosis"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("SecondaryDiagnosis"))
+                      dto.SecondaryDiagnosis = row.Cell(mappedIndex["SecondaryDiagnosis"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("CptCodeWithModifiers"))
+                      dto.CptCodeWithModifiers = row.Cell(mappedIndex["CptCodeWithModifiers"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("CptCode"))
+                      dto.CptCode = row.Cell(mappedIndex["CptCode"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("PrimaryInsurance"))
+                      dto.PrimaryInsurance = row.Cell(mappedIndex["PrimaryInsurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("SecondaryInsurance"))
+                      dto.SecondaryInsurance = row.Cell(mappedIndex["PrimaryInsurance"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("ProviderName"))
+                      dto.ProviderName = row.Cell(mappedIndex["ProviderName"]).GetString().Trim();
+
+                  if (mappedIndex.ContainsKey("TotalAmount"))
+                  {
+                      var cell = row.Cell(mappedIndex["TotalAmount"]);
+                      dto.TotalAmount = GetDecimal(cell);
+                  }
+                  if (mappedIndex.ContainsKey("AdjustAmount"))
+                  {
+                      var cell = row.Cell(mappedIndex["AdjustAmount"]);
+                      dto.AdjustAmount = GetDecimal(cell);
+                  }
+                  if (mappedIndex.ContainsKey("ReceivedAmount"))
+                  {
+                      var cell = row.Cell(mappedIndex["ReceivedAmount"]);
+                      dto.ReceivedAmount = GetDecimal(cell);
+                  }
+
+                  sheetCharges.Add(dto);
+              }
+
+              result.Add(new Tuple<string, List<PaymentDto>>(config.SheetName, sheetCharges));
+          }
+          return result;
+      }
+
+      private decimal? GetDecimal(IXLCell cell)
+      {
+          if (!cell.IsEmpty())
+          {
+              decimal amount;
+
+              // Case 1: Numeric cell (covers int + decimal directly)
+              if (cell.DataType == XLDataType.Number)
+              {
+                  return Convert.ToDecimal(cell.GetDouble());
+              }
+              else
+              {
+                  // Case 2: String (remove $, commas, spaces)
+                  var raw = cell.GetString()
+                                .Replace("#", "")
+                                .Replace("$", "")
+                                .Replace(",", "")
+                                .Trim();
+
+                  if (decimal.TryParse(raw, out amount))
+                  {
+                      return amount;
+                  }
+              }
+          }
+          return null;
+      }
+
+      private DateTime? GetDate(IXLCell cell)
+      {
+          if (cell.DataType == XLDataType.DateTime)
+          {
+              var date = cell.GetDateTime();
+              return date.Date;
+          }
+          var value = cell.Value.GetString();
+          string pattern = @"^(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(\d{4}|\d{2})$";
+          if (Regex.IsMatch(value, pattern))
+          {
+              var culture = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+              culture.Calendar.TwoDigitYearMax = 2099; // Forces 00–99 → 2000–2099
+
+              if (DateTime.TryParseExact(value,
+                                         new[] { "MM/dd/yyyy", "MM/dd/yy" },
+                                         culture,
+                                         DateTimeStyles.None,
+                                         out DateTime date))
+              {
+                  return date.Date;
+              }
+          }
+          if (DateTime.TryParse(cell.GetString(), out var parsed))
+              return parsed;
+
+          return null;
+      }
+  }
+  
+  =================================================
+  
+   private async Task<List<BillingHeaderDto>> ProcessHeaderAsync(Tuple<string, List<string>> header, string systemPrompt, SemaphoreSlim semaphore)
+ {
+     var tmp = new List<BillingHeaderDto>();
+     try
+     {
+         var headersStr = $"Match following headers:\n{string.Join("\n", header.Item2)}";
+         var aiJson = await _aiHelper.GetAiResponse(systemPrompt, new List<string> { headersStr });
+         _appLogger.Info($"AI response for header matching of sheet {header.Item1}: {aiJson}");
+         tmp = aiJson.GetFromJson<List<BillingHeaderDto>>();
+     }
+     finally
+     {
+         semaphore.Release();
+     }
+     return tmp;
+ }
+  
+  ====================================================================
+  
+   public class BillingHeaderDto
+ {
+     [JsonProperty("table_field")]
+     public string TableFiled { get; set; }
+
+     [JsonProperty("matched_field")]
+     public string MatchedField { get; set; }
+
+     [JsonProperty("field_index")]
+     public int? FieldIndex { get; set; }
+ }
+ 
+ 
+ =============================
+ 
