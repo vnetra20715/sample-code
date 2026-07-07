@@ -1,0 +1,139 @@
+ public class AppDbContext : DbContext
+ {
+     private readonly IConfiguration _configuration;
+     private readonly IAppLogger _logger;
+
+     public AppDbContext(IConfiguration configuration, IAppLogger logger)
+     {
+         _configuration = configuration;
+         _logger = logger;
+     }
+     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+     {
+         string conStr = "";
+         if (_configuration["ConnectionStrings:DbType"].GetString() == "MySql")
+         {
+             conStr = _configuration["ConnectionStrings:MySql"];
+             optionsBuilder.UseMySql(conStr, ServerVersion.AutoDetect(conStr));
+         }
+         else
+         {
+             conStr = _configuration["ConnectionStrings:Sql"];
+             optionsBuilder.UseSqlServer(conStr);
+         }
+         if (_configuration["LogMode"] == "Debug")
+         {
+             optionsBuilder.LogTo(_logger.Debug, LogLevel.Information);
+         }
+     }
+}
+
+
+ public class QueryHelper
+ {
+     private IConfiguration _configuration = null;
+     private bool _isTransaction = false;
+     private DbConnection _transactionConnection = null;
+     private DbTransaction _transaction = null;
+
+     public QueryHelper(IConfiguration configuration)
+     {
+         _configuration = configuration;
+     }
+
+     public async Task BeginTransaction()
+     {
+         var conn = GetDbConnection();
+         await conn.OpenAsync();
+         _isTransaction = true;
+         _transactionConnection = conn;
+         _transaction = await conn.BeginTransactionAsync();
+     }
+
+     public async Task CommitTransaction()
+     {
+         if (_isTransaction)
+         {
+             await _transaction.CommitAsync();
+             _transactionConnection.Close();
+             _isTransaction = false;
+         }
+     }
+
+     public async Task RollbackTransaction()
+     {
+         if (_isTransaction)
+         {
+             await _transaction.RollbackAsync();
+             _transactionConnection.Close();
+             _isTransaction = false;
+         }
+     }
+
+     private DbConnection GetDbConnection()
+     {
+         if (_configuration["ConnectionStrings:DbType"].GetString() == "MySql")
+         {
+             return new MySqlConnection(_configuration["ConnectionStrings:MySql"]);
+         }
+         else
+         {
+             return new SqlConnection(_configuration["ConnectionStrings:Sql"]);
+         }
+     }
+
+
+     public async Task<IEnumerable<T>> Query<T>(string query, object param = null)
+     {
+         if (_transactionConnection != null)
+         {
+             return await SqlMapper.QueryAsync<T>(_transactionConnection, query, param, _transaction);
+         }
+         using (var conn = GetDbConnection())
+         {
+             return await SqlMapper.QueryAsync<T>(conn, query, param);
+         }
+     }
+
+     public async Task ExecuteQuery(string query, object param = null)
+     {
+         if (_transactionConnection != null)
+         {
+             await SqlMapper.ExecuteAsync(_transactionConnection, query, param, _transaction);
+             return;
+         }
+         using (var conn = GetDbConnection())
+         {
+             await SqlMapper.ExecuteAsync(conn, query, param);
+         }
+     }
+
+     public async Task<T> ExecuteScalar<T>(string query, object param = null)
+     {
+         if (_transactionConnection != null)
+         {
+             var t = await _transactionConnection.ExecuteScalarAsync<T>(query, param, _transaction);
+             return t;
+         }
+         using (var conn = GetDbConnection())
+         {
+             var t = await conn.ExecuteScalarAsync<T>(query, param);
+             return t;
+         }
+     }
+
+     public long? GetSingleId(string query, object param = null)
+     {
+         if (_transactionConnection == null)
+         {
+             return _transactionConnection.QuerySingleOrDefault<long?>(query, param, _transaction);
+         }
+         using (var conn = GetDbConnection())
+         {
+             return conn.QuerySingleOrDefault<long?>(query, param, _transaction);
+         }
+     }
+ }
+
+
+
