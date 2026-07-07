@@ -1,0 +1,174 @@
+var builder = WebApplication.CreateBuilder(args);
+
+AppConstant.Profile = System.Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+AddAuthentication(builder);
+AddSession(builder);
+AddMapper(builder);
+builder.Services.AddSingleton<IMemoryCache, MemoryCache>();
+builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
+builder.Services.AddControllersWithViews(options =>
+{
+    //Can be used like this
+    //options.Filters.Add<GlobalExceptionFilter>();
+}).AddSessionStateTempDataProvider();
+builder.Services.AddControllers().AddNewtonsoftJson();
+builder.Services.AddRouting(options => options.LowercaseUrls = true);
+builder.Services.AddSingleton(typeof(IConfiguration), GetIConfiguration());
+
+
+
+////////builder.Services.AddResponseCompression(options =>
+////////{
+////////    options.EnableForHttps = true; // Enable compression for HTTPS
+////////    options.MimeTypes = new[] { "text/plain", "text/css", "application/javascript", "text/html", "application/json", "image/svg+xml" };
+////////    options.Providers.Add<BrotliCompressionProvider>();
+////////    options.Providers.Add<GzipCompressionProvider>();
+////////});
+
+
+
+AddCoreServices(builder);
+
+var app = builder.Build();
+
+app.UseMiddleware<ExceptionMiddleware>();
+
+// Configure the HTTP request pipeline.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Home/Error");
+}
+
+SessionHelper.Configure(app.Services.GetRequiredService<IHttpContextAccessor>(),
+                                       app.Services.GetRequiredService<IConfiguration>());
+
+////app.UseMiddleware<MinificationMiddleware>();
+
+////app.UseResponseCompression();
+
+app.UseStaticFiles();
+
+app.UseRouting();
+
+app.UseAuthorization();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
+
+
+//minify output html
+//Todo To Do
+//Error in minification
+////app.UseMiddleware<HtmlMinificationMiddleware>();
+
+
+
+app.Run();
+
+
+static void AddCoreServices(WebApplicationBuilder builder)
+{
+    //General
+    builder.Services.AddHttpClient();
+    builder.Services.AddSingleton<ImageHelper>();
+    //if (AppConstant.Profile.ToLower() == "production")
+    //{
+    //    builder.Services.AddSingleton<IAppLogger, AppinsightsLogger>();
+    //}
+    //else
+    //{
+    //    builder.Services.AddSingleton<IAppLogger, FileLogger>();
+    //}
+    builder.Services.AddSingleton<IAppLogger, FileLogger>();
+    builder.Services.AddScoped<AppDbContext, AppDbContext>();
+    builder.Services.AddScoped<QueryHelper, QueryHelper>();
+    builder.Services.AddScoped<IBusinessHelper, BusinessHelper>();
+    builder.Services.AddScoped<IUserManager, UserManager>();
+    builder.Services.AddScoped<IAccountManager, AccountManager>();
+    builder.Services.AddScoped<ILicenseManager, SmartVault.Business.Core.LicenseManager>();
+    builder.Services.AddScoped<IExternalOrganizationManager, ExternalOrganizationManager>();
+    builder.Services.AddScoped<IFileManager, FileManager>();
+    builder.Services.AddScoped<IBillingManager, BillingManager>();
+    builder.Services.AddScoped<IReconciliationManager, ReconciliationManager>();
+    builder.Services.AddScoped<IAgentOrchestrator, AgentOrchestrator>();
+    builder.Services.AddScoped<IAppManager, AppManager>();
+    builder.Services.AddScoped<IPatientManager, PatientManager>();
+    builder.Services.AddScoped<IHl7Manager, Hl7Manager>();
+    builder.Services.AddScoped<AiHelper>();
+    builder.Services.AddKeyedScoped<IChatAgent, ChartAgent>("Chart Agent");
+    builder.Services.AddKeyedScoped<IChatAgent, BillingAnalysisAgent>("Billing Analysis Agent");
+    builder.Services.AddKeyedScoped<IChatAgent, ChartAgent>("Dashboard Generation Agent");
+    builder.Services.AddKeyedScoped<IChatAgent, GeneralQueryAgent>("General Query Agent");
+    builder.Services.AddKeyedScoped<IChatAgent, DatabaseQueryAgent>("Database Query Agent");
+}
+
+
+static void AddSession(WebApplicationBuilder builder)
+{
+    builder.Services.AddSession(options =>
+    {
+        // Set a short timeout for easy testing.
+        options.IdleTimeout = TimeSpan.FromSeconds(60 * 60);
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        //options.Cookie.SameSite = SameSiteMode.None;
+        //options.IOTimeout = TimeSpan.FromSeconds(60 * 30);
+    });
+}
+
+static void AddMapper(WebApplicationBuilder builder)
+{
+    var mapperConfig = new MapperConfiguration(mc =>
+    {
+        mc.AddProfile(new MappingProfile());
+    });
+    IMapper mapper = mapperConfig.CreateMapper();
+    builder.Services.AddSingleton(mapper);
+}
+
+static void AddAuthentication(WebApplicationBuilder builder)
+{
+    builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+              .AddCookie(options =>
+              {
+                  options.LogoutPath = "/login";
+                  options.LoginPath = "/login";
+                  options.ReturnUrlParameter = "return-url";
+                  //options.Cookie.Expiration = TimeSpan.FromMinutes(15);
+                  options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
+                  options.SlidingExpiration = true;
+              });
+
+    builder.Services.AddAuthorization(options =>
+    {
+        options.AddPolicy(AppConstant.InternalUserPolicy, policy =>
+                                policy.RequireAssertion(context =>
+                                    context.User.HasClaim(c => c.Type == AppConstant.InternalUserPolicy)));
+        options.AddPolicy(AppConstant.AccountUserPolicy, policy =>
+                                policy.RequireAssertion(context =>
+                                    context.User.HasClaim(c => c.Type == AppConstant.AccountUserPolicy)));
+    });
+}
+
+
+static IConfiguration GetIConfiguration()
+{
+    var evn = System.Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+    if (string.IsNullOrEmpty(evn) == false)
+    {
+        evn = "." + evn;
+    }
+    IConfiguration configuration = new ConfigurationBuilder()
+                                    //.SetBasePath(Directory.GetCurrentDirectory())
+                                    //.AddJsonFile($"appsettings{evn}.json")
+                                    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+                                    .AddJsonFile($"appsettings{evn}.json", true, true)
+                                    .AddEnvironmentVariables()
+                                    .Build();
+    if (configuration["ConnectionStrings:DbType"] == "MySql")
+    {
+        AppConstant.MySql = true;
+    }
+    return configuration;
+}
