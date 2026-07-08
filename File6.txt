@@ -1,0 +1,16 @@
+private async Task<List<BillingHeaderDto>> ProcessHeaderAsync(Tuple<string, List<string>> header, string systemPrompt, SemaphoreSlim semaphore)
+{
+    var tmp = new List<BillingHeaderDto>();
+    try
+    {
+        var headersStr = $"Match following headers:\n{string.Join("\n", header.Item2)}";
+        var aiJson = await _aiHelper.GetAiResponse(systemPrompt, new List<string> { headersStr });
+        _appLogger.Info($"AI response for header matching of sheet {header.Item1}: {aiJson}");
+        tmp = aiJson.GetFromJson<List<BillingHeaderDto>>();
+    }
+    finally
+    {
+        semaphore.Release();
+    }
+    return tmp;
+}
