@@ -1,0 +1,621 @@
+public async Task<string> SemanticHybridSearch(long patientId, string query, float[] queryEmbeddings, int seconds)
+{
+    StringBuilder br = new StringBuilder();
+    var indexName = _configuration["VectorStore:PatientNoteIndex"];
+    var client = new SearchIndexClient(new Uri(_configuration["VectorStore:Url"]), new AzureKeyCredential(_configuration["VectorStore:ApiKey"]));
+    var searchClient = client.GetSearchClient(indexName);
+
+    query = query.Trim();
+    var searchOptions = new SearchOptions
+    {
+        VectorSearch = new VectorSearchOptions()
+        {
+            Queries = { new VectorizedQuery(queryEmbeddings)
+                { KNearestNeighborsCount = 30, Fields = { "NoteVector" } } },
+        },
+        SemanticSearch = new SemanticSearchOptions()
+        {
+            SemanticConfigurationName = _configuration["VectorStore:SemanticSearchConfigName"],
+            QueryCaption = new QueryCaption(QueryCaptionType.Extractive),
+            QueryAnswer = new QueryAnswer(QueryAnswerType.Extractive),
+        },
+        QueryType = SearchQueryType.Semantic,
+        Size = 30,
+        Select = { "Id", "NoteText" },
+        Filter = $"PatientId eq {patientId}",
+    };
+
+    //string filter = $"PatientId eq '{patientId}' and DocumentType eq '{documentType}'";
+    //string filter = $"PatientId eq {patientId} and DocumentType eq '{documentType}'";
+
+    SearchResults<NoteVectorContent> response = await searchClient.SearchAsync<NoteVectorContent>(query, searchOptions);
+    //foreach (QueryAnswerResult result in response.SemanticSearch.Answers)
+    //{
+    //    Console.WriteLine($"Answer Highlights: {result.Highlights}");
+    //    Console.WriteLine($"Answer Text: {result.Text}");
+    //}
+    int count = 0;
+    var results = response.GetResults();
+    if (results != null)
+    {
+        foreach (var x in results)
+        {
+            if (x.SemanticSearch.RerankerScore > 0.5)
+            {
+                br.Append(TransformData(x.Document.NoteText, seconds));
+                br.Append("\n");
+                count++;
+            }
+        }
+        _logger.Info($"{Environment.NewLine}Documents Selected: {results.Count()}, Documents Processed: {count}");
+    }
+    return br.ToString().Trim();
+}
+
+
+==================================================
+
+using Azure.Search.Documents.Indexes.Models;
+using Azure.Search.Documents.Indexes;
+using Azure;
+
+==============================================================================
+ public class VectorDocument
+ {
+     [SimpleField(IsKey = true, IsFilterable = true, IsSortable = true, IsFacetable = true)]
+     public string Id { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public int? ProjectId { get; set; }
+     
+     [SearchableField(IsFilterable = true)]
+     public string Content { get; set; }
+
+     public float[] VectorContent { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public long? PatientId { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public long? UserId { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public long? AccountId { get; set; }
+     
+     [SearchableField(IsFilterable = true)]
+     public string Category { get; set; }
+
+     [SearchableField(IsFilterable = true)]
+     public string Keywords { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public int TypeId { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public long? ParentId { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public int? Status { get; set; }
+     
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public long? CreateBy { get; set; }
+
+     [SimpleField(IsFilterable = true, IsSortable = true)]
+     public DateTime? CreateDate { get; set; }
+ }
+==============================
+
+public AiService(IConfiguration configuration, AppDbContext dbContext, QueryHelper queryHelper, IMapper mapper, IMemoryCache memoryCache)
+ : base(configuration, mapper, dbContext, queryHelper)
+{
+    var credential = new AzureKeyCredential(_configuration["OpenAI:ApiKey"]);
+    _openAIClient = new AzureOpenAIClient(new Uri(_configuration["OpenAI:Url"]), credential);
+    _memoryCache = memoryCache;
+}
+
+public async Task<float[]> GetEmbeddings(string text)
+{
+    var embeddingClient = _openAIClient.GetEmbeddingClient(_configuration["OpenAI:VectorDeploymentName"]);
+    var response = await embeddingClient.GenerateEmbeddingAsync(text);
+    return response.Value.ToFloats().ToArray();
+}
+
+============================================================================================
+
+ public class AiDocumentService : BusinessBase, IAiDocumentService
+ {
+     SearchClient _searchClient = null;
+     int? _projectId = null;
+     string _indexName = "";
+     public AiDocumentService(IConfiguration configuration, AppDbContext dbContext, QueryHelper queryHelper, IMapper mapper)
+      : base(configuration, mapper, dbContext, queryHelper)
+     {
+         _projectId = _configuration["ProjectId"].GetInt();
+         _indexName = _configuration["VectorStore:MainIndex"];
+         _searchClient = new SearchClient(new Uri(_configuration["VectorStore:Url"]),
+                                                     _indexName, new AzureKeyCredential(_configuration["VectorStore:ApiKey"]));
+     }
+
+     public async Task IndexDocuments(List<VectorDocument> documents)
+     {
+         if (documents == null || documents.Count == 0)
+         {
+             return;
+         }
+         foreach (var doc in documents)
+         {
+             doc.ProjectId = _projectId;
+             if (string.IsNullOrEmpty(doc.Id))
+             {
+                 doc.Id = GetDocumentId(doc);
+             }
+         }
+         await _searchClient.IndexDocumentsAsync(IndexDocumentsBatch.Upload(documents));
+     }
+
+
+     public async Task DeleteFromIndex(long parentId, long accountId, VectorContentType type)
+     {
+         var documentIds = await FindDocumentIdsByParentId(parentId, accountId, type);
+         if (documentIds != null && documentIds.Count > 0)
+         {
+             await _searchClient.DeleteDocumentsAsync("id", documentIds);
+         }
+     }
+
+     private async Task<List<string>> FindDocumentIdsByParentId(long parentId, long accountId, VectorContentType type)
+     {
+         int typeVal = (int)type;
+         string filter = $"ProjectId eq {_projectId} and ParentId eq {parentId} and TypeId eq {typeVal} and AccountId eq {accountId}";
+         var searchOptions = new SearchOptions
+         {
+             Filter = filter,
+             Select = { "Id" },
+             Size = 1000
+         };
+         var searchResults = await _searchClient.SearchAsync<VectorDocument>("*", searchOptions);
+         List<string> documentIds = searchResults.Value.GetResults()
+                                                       .Select(r => r.Document.Id)
+                                                       .ToList();
+         return documentIds;
+     }
+
+
+     private string GetDocumentId(VectorDocument document)
+     {
+         if (string.IsNullOrEmpty(document.Id) == false)
+         {
+             return document.Id;
+         }
+         if (document.ProjectId == null)
+         {
+             throw new ArgumentNullException(nameof(document.ProjectId), "Project id is required.");
+         }
+         if (document.ParentId.GetLong() == 0)
+         {
+             throw new ArgumentNullException(nameof(document.ParentId), "Patient id is required.");
+         }
+         if (document.TypeId == 0)
+         {
+             throw new ArgumentNullException(nameof(document.TypeId), "Type id is required.");
+         }
+         if (document.AccountId.GetLong() == 0)
+         {
+             throw new ArgumentNullException(nameof(document.AccountId), "Account id is required.");
+         }
+         return AppUtils.AppendRandomSuffix($"{document.ProjectId}-{document.ParentId}-{document.AccountId}-{document.TypeId}-", 8).ToLower();
+     }
+
+     public async Task CreateMainIndex(string key)
+     {
+         if (_configuration["VectorStore:CreateIndexKey"] != key)
+         {
+             throw new ArgumentNullException(nameof(key), "Invalid key.");
+         }
+         var indexName = _configuration["VectorStore:MainIndex"];
+         var modelDimensions = _configuration["VectorStore:ModelDimensions"].GetInt();
+         var vectorSearchProfile = _configuration["VectorStore:VectorSearchProfile"];
+         var searchServiceUri = new Uri(_configuration["VectorStore:Url"]);
+         var apiKey = _configuration["VectorStore:ApiKey"];
+
+         var client = new SearchIndexClient(searchServiceUri, new AzureKeyCredential(apiKey));
+
+         // Check if index already exists
+         if (client.GetIndexNames().Contains(indexName))
+             return;
+
+         // Build fields from your model
+         var fields = new FieldBuilder().Build(typeof(VectorDocument));
+
+         // Replace vector field with proper vector configuration
+         var vectorField = new SearchField("VectorContent", SearchFieldDataType.Collection(SearchFieldDataType.Single))
+         {
+             IsSearchable = true, // Embeddings are NOT text-searchable
+             VectorSearchDimensions = modelDimensions,
+             VectorSearchProfileName = vectorSearchProfile
+         };
+
+         // Remove old field definition and add vector field
+         var removeField = fields.FirstOrDefault(f => f.Name.Equals("VectorContent", StringComparison.OrdinalIgnoreCase));
+         fields.Remove(removeField);
+         fields.Add(vectorField);
+         var tmp = client.GetIndexNames().ToList();
+         if (tmp.Contains(indexName) == false)
+         {
+             var index = GetIndex(indexName, fields);
+             await client.CreateOrUpdateIndexAsync(index);
+         }
+     }
+
+
+     private SearchIndex GetIndex(string name, IList<SearchField> fields)
+     {
+         var hns = new HnswAlgorithmConfiguration(_configuration["VectorStore:VectorSearchHnswConfig"])
+         {
+             Name = _configuration["VectorStore:VectorSearchHnswConfig"],
+             Parameters = new HnswParameters
+             {
+                 EfConstruction = 400,
+                 M = 16,
+                 EfSearch = 100, // Adjust efSearch as needed
+                 Metric = VectorSearchAlgorithmMetric.Cosine
+             }
+         };
+         var vsp = new VectorSearchProfile(_configuration["VectorStore:VectorSearchProfile"], _configuration["VectorStore:VectorSearchHnswConfig"]);
+         SearchIndex searchIndex = new(name)
+         {
+             VectorSearch = new()
+             {
+                 Profiles = { vsp },
+                 Algorithms = { hns },
+             },
+             SemanticSearch = new()
+             {
+                 Configurations =
+                 {
+                    new SemanticConfiguration(_configuration["VectorStore:SemanticSearchConfigName"],
+                    new () {
+                        TitleField = new SemanticField("Category"),
+                        ContentFields ={ new SemanticField("Content") },
+                        KeywordsFields ={ new SemanticField("Keywords") }
+                    })
+                 },
+             },
+             Fields = fields
+         };
+         return searchIndex;
+     }
+
+
+
+     public async Task SaveToVectorIndex(VectorContentType type, Object dto, string content, float[] vectorContent, bool add)
+     {
+         long id = 0;
+         string tableName = "";
+         VectorDocument vectorDoc = null;
+         switch (type)
+         {
+             case VectorContentType.PatientCommunication:
+                 {
+                     var p = (PatientCommunicationDto)dto;
+                     id = p.Id;
+                     tableName = "patient_communications";
+                     vectorDoc = GetVectorDocumentFromCommunication(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientMedicalHistory:
+                 {
+                     var p = (PatientMedicalHistoryDto)dto;
+                     id = p.Id;
+                     tableName = "patient_medical_history";
+                     vectorDoc = GetVectorDocumentFromMedicalHistory(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientProblems:
+                 {
+                     var p = (PatientProblemDto)dto;
+                     id = p.Id;
+                     tableName = "patient_problems";
+                     vectorDoc = GetVectorDocumentFromProblems(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientAllergy:
+                 {
+                     var p = (PatientAllergyDto)dto;
+                     id = p.Id;
+                     tableName = "patient_allergy";
+                     vectorDoc = GetVectorDocumentFromAllergies(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientSdoh:
+                 {
+                     var p = (PatientSdohDto)dto;
+                     id = p.Id;
+                     tableName = "patient_sdoh";
+                     vectorDoc = GetVectorDocumentFromSdoh(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientSurgicalHistory:
+                 {
+                     var p = (PatientSurgicalHistoryDto)dto;
+                     id = p.Id;
+                     tableName = "patient_surgical_history";
+                     vectorDoc = GetVectorDocumentFromSurgicalHistorty(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientInsurance:
+                 {
+                     var p = (PatientInsuranceDto)dto;
+                     id = p.Id;
+                     tableName = "patient_insurance";
+                     vectorDoc = GetVectorDocumentFromInsurance(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientVitalSign:
+                 {
+                     var p = (PatientVitalSignDto)dto;
+                     id = p.Id;
+                     tableName = "patient_vital_signs";
+                     vectorDoc = GetVectorDocumentFromVitalSings(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.EmergencyContact:
+                 {
+                     var p = (PatientEmergencyContactDto)dto;
+                     id = p.Id;
+                     tableName = "patient_emergency_contacts";
+                     vectorDoc = GetVectorDocumentFromEmergencyContact(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.PatientEmployer:
+                 {
+                     var p = (PatientEmployerDto)dto;
+                     id = p.Id;
+                     tableName = "patient_employers";
+                     vectorDoc = GetVectorDocumentFromPatientEmployer(p, content, vectorContent);
+                     break;
+                 }
+             case VectorContentType.Referral:
+                 {
+                     var p = (PatientReferralDto)dto;
+                     id = p.Id;
+                     tableName = "patient_referrals";
+                     vectorDoc = GetVectorDocumentFromPatientReferral(p, content, vectorContent);
+                     break;
+                 }
+
+             default:
+                 throw new ArgumentOutOfRangeException(nameof(type), "Unsupported vector content type.");
+         }
+         await IndexDocuments(new List<VectorDocument> { vectorDoc });
+         if (add)
+         {
+             var qry = $"Update {tableName} set VectorId = @VectorId where Id = @Id";
+             await _queryHelper.ExecuteQuery(qry, new { VectorId = vectorDoc.Id, Id = id });
+         }
+     }
+
+     private VectorDocument GetVectorDocumentFromPatientReferral(PatientReferralDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.Referral,
+             Category = "Patient Referral",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromPatientEmployer(PatientEmployerDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientEmployer,
+             Category = "Patient Employer",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+
+     private VectorDocument GetVectorDocumentFromEmergencyContact(PatientEmergencyContactDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.EmergencyContact,
+             Category = "Patient Emergency Contact",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+
+     private VectorDocument GetVectorDocumentFromCommunication(PatientCommunicationDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             UserId = dto.UserId,
+             TypeId = (int)VectorContentType.PatientCommunication,
+             Category = "Patient Communication",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromMedicalHistory(PatientMedicalHistoryDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientMedicalHistory,
+             Category = "Patient Medical History",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromProblems(PatientProblemDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientProblems,
+             Category = "Patient Problems",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromInsurance(PatientInsuranceDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientInsurance,
+             Category = "Patient Insurance",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromVitalSings(PatientVitalSignDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientVitalSign,
+             Category = "Patient Vital Signs",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromAllergies(PatientAllergyDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientAllergy,
+             Category = "Patient Allergies",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromSdoh(PatientSdohDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientSdoh,
+             Category = "Patient SDOH",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+
+     private VectorDocument GetVectorDocumentFromSurgicalHistorty(PatientSurgicalHistoryDto dto, string content, float[] vectorContent)
+     {
+         VectorDocument vectorDoc = new VectorDocument
+         {
+             ProjectId = _configuration["ProjectId"].GetInt(),
+             Id = dto.VectorId,
+             AccountId = dto.AccountId,
+             ParentId = dto.Id,
+             PatientId = dto.PatientId.GetLong(),
+             CreateDate = dto.CreateDate,
+             CreateBy = dto.CreateBy,
+             Status = 1,
+             TypeId = (int)VectorContentType.PatientSurgicalHistory,
+             Category = "Patient Surgical Historty",
+             Content = content,
+             VectorContent = vectorContent,
+         };
+         return vectorDoc;
+     }
+ }
